@@ -398,11 +398,12 @@ def main():
     REGION = "europe-west4"
     PROJECT_ID = "gapmaanim"
     display_name = "test_corpus"    
-    data_file = "files/data.json"
+    # data_file = "files/data.json"
     # json_file_path = "https://drive.google.com/file/d/1zQJ6Kx1XmnD9tBQJT9KKsqQ5kymR0aqD/view?usp=drive_link"
-    # paths = ["https://drive.google.com/file/d/1lIU-DKYKOAbd6vslKP6xFVZiyPGIHQgX/view?usp=sharing"] PDF file
+    paths = ["https://drive.google.com/file/d/1lIU-DKYKOAbd6vslKP6xFVZiyPGIHQgX/view?usp=sharing"] 
     model_name = "gemini-2.0-flash-lite"
-    query_text = "מידע על שירותים דיגיטליים"
+    # query_text = "מידע על שירותים דיגיטליים"
+    query_text = "מה זה PVD?"
     
     # Initialize Vertex AI
     initialize_vertex_ai(PROJECT_ID, REGION)
@@ -414,10 +415,10 @@ def main():
     rag_corpus = get_or_create_rag_corpus(display_name, embedding_model_config)
     
     # Import JSON file to corpus (each item as separate document)
-    import_json_to_corpus(rag_corpus.name, data_file)
+    # import_json_to_corpus(rag_corpus.name, data_file)
     
     # Import PDF files to corpus
-    # import_new_files_to_corpus(rag_corpus.name, paths)
+    import_new_files_to_corpus(rag_corpus.name, paths)
     
     # Create RAG retrieval configuration
     rag_retrieval_config = create_rag_retrieval_config()
