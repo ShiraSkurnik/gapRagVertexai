@@ -1,1 +1,6 @@
 google-cloud-aiplatform>=1.38.0
+
+# vertex ai vector search (customized)
+langchain-core==0.3.65
+langchain==0.3.25
+python-dotenv==1.1.1

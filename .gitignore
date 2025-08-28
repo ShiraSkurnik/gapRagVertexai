@@ -2,3 +2,4 @@
 .env
 
 venv/
+rag-service-account-key-shira.json
