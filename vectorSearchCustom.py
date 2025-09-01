@@ -1,9 +1,3 @@
-# embedding work, but search faild on proxy with gRPC  its work only with http1
-# error:
-# <_InactiveRpcError of RPC that terminated with:
-#         status = StatusCode.UNAVAILABLE
-#         details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:10.20.14.35:8080: Trying to connect an http1.x server (HTTP status 500)"
-#         debug_error_string = "UNKNOWN:Error received from peer  {grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:10.20.14.35:8080: Trying to connect an http1.x server (HTTP status 500)"}"
 from google.cloud import aiplatform, storage
 from google.cloud.aiplatform import MatchingEngineIndex, MatchingEngineIndexEndpoint
 from vertexai.language_models import TextEmbeddingModel
@@ -27,16 +21,16 @@ location = "europe-west4"
 aiplatform.init(project=project_id, location=location)
  
 # אתחול המודל של Vertex AI
-model = TextEmbeddingModel.from_pretrained("text-embedding-005")
+model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
  
 # אתחול חיבור ל-Cloud Storage
 storage_client = storage.Client()
  
 # הגדרות Vertex AI Vector Search
 BUCKET_NAME = "gap-vector-search"
-INDEX_DISPLAY_NAME = "gap-rag-index"
-INDEX_ENDPOINT_DISPLAY_NAME = "gap-rag-endpoint"
-DIMENSIONS = 768  # גודל הוקטורים של text-embedding-005
+INDEX_DISPLAY_NAME = "gap-rag-txt-index"
+INDEX_ENDPOINT_DISPLAY_NAME = "gap-rag-txt-endpoint"
+DIMENSIONS = 3072  # גודל הוקטורים של gemini-embedding-001
  
 class VertexAIVectorSearch:
     """מחלקה לניהול Vertex AI Vector Search"""
@@ -133,11 +127,14 @@ class VertexAIVectorSearch:
         """יצירת endpoint לאינדקס"""
         
         print("Creating index endpoint...")
+        network=f"projects/{self.project_id}/global/networks/default"
+        print(f"index endpoint network: {network}")
         
         index_endpoint = aiplatform.MatchingEngineIndexEndpoint.create(
             display_name=INDEX_ENDPOINT_DISPLAY_NAME,
             description="Endpoint for GAP RAG index",
             public_endpoint_enabled=True,  # אפשר גישה ציבורית
+            # network = network,  # Add explicit network
             labels={
                 "environment": "production",
                 "use_case": "rag"
@@ -189,6 +186,8 @@ class VertexAIVectorSearch:
                     machine_type=machine_type,
                     min_replica_count=1,
                     max_replica_count=2,
+                    #enable_access_logging=False,  # Add this
+                    #deployed_index_auth_config=None,  # Add this for public access
                 )
                 
                 self.deployed_index_id = deployed_id
@@ -230,22 +229,6 @@ class VertexAIVectorSearch:
         
         raise Exception("Failed to deploy index with any machine type")
  
- 
-    def undeploy_existing_index(self, index_endpoint: MatchingEngineIndexEndpoint, deployed_id: str):
-        """הסרת פריסה קיימת אם נדרש"""
-        try:
-            print(f"Undeploying existing index: {deployed_id}")
-            index_endpoint.undeploy_index(deployed_index_id=deployed_id)
-            
-            # המתנה להשלמת ההסרה
-            print("Waiting for undeploy to complete...")
-            time.sleep(60)
-            
-            print("✓ Successfully undeployed")
-        except Exception as e:
-            print(f"Error undeploying: {e}")
- 
- 
     def check_deployment_status(self):
         """בדיקת סטטוס הפריסה"""
         if not self.index_endpoint:
@@ -284,61 +267,6 @@ class VertexAIVectorSearch:
             print(f"Error checking status: {e}")
             return False
             
-    def search(self, query: str, population: Optional[str] = None, code_maane: Optional[str] = None, top_k: int = 5) -> List[Dict]:
-        """
-        חיפוש משולב - סמנטי + metadata
-        
-        Args:
-            query: השאילתא לחיפוש
-            population: סינון לפי אוכלוסייה (אופציונלי)
-            code_maane: סינון לפי קוד מענה (אופציונלי)
-            top_k: מספר התוצאות
-            
-        Returns:
-            רשימת תוצאות עם ציוני דמיון
-        """
-        
-        if not self.index_endpoint or not self.deployed_index_id:
-            raise ValueError("Index endpoint not deployed")
-        
-        # יצירת embedding לשאילתא
-        query_embedding = model.get_embeddings([query])[0].values
-        
-        # בניית פילטרים
-        filters = []
-        
-        if population:
-            filters.append({
-                "namespace": "population",
-                "allow_list": [population]
-            })
-            
-        if code_maane:
-            filters.append({
-                "namespace": "code_maane",
-                "allow_list": [code_maane]
-            })
-        
-        # ביצוע החיפוש
-        response = self.index_endpoint.find_neighbors(
-            deployed_index_id=self.deployed_index_id,
-            queries=[query_embedding],
-            num_neighbors=top_k,
-            filter=filters if filters else None
-        )
-        
-        # עיבוד התוצאות
-        results = []
-        for neighbor_list in response:
-            for neighbor in neighbor_list:
-                results.append({
-                    "id": neighbor.id,
-                    "distance": neighbor.distance,
-                    "similarity": 1 - neighbor.distance,  # המרה לציון דמיון
-                })
-        
-        return results
- 
     def get_existing_index_and_endpoint(self):
         """מציאת אינדקס ו-endpoint קיימים"""
         # חיפוש אינדקס קיים
@@ -378,21 +306,7 @@ class VertexAIVectorSearch:
                 if self.index:
                     print("Will deploy the index...")
                     self.deploy_index(self.index, self.index_endpoint)
- 
- 
- 
-def get_file_hash(file_path: str) -> str:
-    """Generate hash for file to track changes"""
-    hash_md5 = hashlib.md5()
-    try:
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
-    except Exception as e:
-        print(f"Error generating file hash: {e}")
-        return ""
- 
+
  
 def load_document(file_path: str) -> List[Document]:
     """Load and process document based on file type"""
@@ -422,7 +336,34 @@ def load_document(file_path: str) -> List[Document]:
                 }
  
                 documents.append(Document(page_content=content, metadata=metadata))
+        elif file_ext == '.txt':
+            # Load text file
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
+            # פיצול הטקסט ל־chunks עם חפיפה
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+ 
+            chunks = text_splitter.split_text(content)
+ 
+            for i, chunk in enumerate(chunks):
+                if i < 2:
+                    population = "מוסד"
+                elif i < 4:
+                    population = "רשות"
+                else:
+                    population = "מחז"
+                metadata = {
+                    "type": "txt",
+                    "chunk_index": i,
+                    "source": Path(file_path).name,
+                    "population": population
+                }   
+                documents.append(Document(page_content=chunk, metadata=metadata))
+
     except Exception as e:
         print(f"Error loading document {file_path}: {e}")
         
@@ -434,19 +375,12 @@ def create_embeddings(documents: List[Document]):
     if not documents:
         raise ValueError("No documents provided")
     
-    # Split documents into chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=10000,
-        chunk_overlap=0,
-        separators=["\n\n", "\n", " ", ""]
-    )
-    
-    splits = text_splitter.split_documents(documents)
-    print(f"Created {len(splits)} document chunks")
-    
     # Get embeddings using Vertex AI model
-    embeddings = model.get_embeddings([doc.page_content for doc in splits])
-    return splits, embeddings
+    embeddings = model.get_embeddings(
+        [doc.page_content for doc in documents],
+        output_dimensionality=DIMENSIONS
+    )
+    return documents, embeddings
  
 def simple_rag_search_fixed(
     query: str,
@@ -472,8 +406,16 @@ def simple_rag_search_fixed(
         endpoint_resource_name = endpoints[0].resource_name
         print(f"נמצא endpoint: {endpoint_resource_name}")
         
-        # יצירת endpoint object חדש בדרך בטוחה יותר
-        index_endpoint = aiplatform.MatchingEngineIndexEndpoint(index_endpoint_name=endpoint_resource_name)
+        # Force refresh the endpoint to get latest network configuration
+        index_endpoint = aiplatform.MatchingEngineIndexEndpoint(
+            index_endpoint_name=endpoint_resource_name
+        )      
+
+        # וודא שיש gRPC endpoint מוגדר
+        if hasattr(index_endpoint._gca_resource, 'private_service_connect_config'):
+            print("Using private service connect configuration")
+        elif hasattr(index_endpoint._gca_resource, 'public_endpoint_domain_name'):
+            print(f"Using public endpoint: {index_endpoint._gca_resource.public_endpoint_domain_name}")
         
         # 2. מציאת האינדקס הפרוס
         deployed_indexes = index_endpoint.deployed_indexes
@@ -485,8 +427,14 @@ def simple_rag_search_fixed(
         
         # 3. יצירת embedding לשאילתא
         print(f"יוצר embedding עבור: '{query}'")
-        query_embedding = model.get_embeddings([query])[0].values
-        
+        query_embedding = model.get_embeddings(
+            [query],
+            output_dimensionality=DIMENSIONS
+        )[0].values
+        # Add debugging
+        print(f"Query embedding length: {len(query_embedding)}")
+        print(f"Query embedding first 5 values: {query_embedding[:5]}")
+
         # 4. בניית פילטרים אם נדרש
         filters = []
         if population:
@@ -507,32 +455,30 @@ def simple_rag_search_fixed(
         print("מבצע חיפוש...")
         #print(index_endpoint._gca_resource.network_endpoint)
 
-        # שימוש ב-match במקום find_neighbors
-        try:
-            response = index_endpoint.match(
-                deployed_index_id=deployed_index_id,
-                queries=[query_embedding],
-                num_neighbors=top_k,
-                filter=filters if filters else None
-            )
-        except AttributeError:
-            # אם match לא עובד, ננסה עם public_match
-            try:
-                response = index_endpoint.public_match(
-                    deployed_index_id=deployed_index_id,
-                    queries=[query_embedding],
-                    num_neighbors=top_k,
-                    filter=filters if filters else None
-                )
-            except AttributeError:
-                # אם גם זה לא עובד, ננסה עם find_neighbors באופן ישיר
-                response = index_endpoint.find_neighbors(
-                    deployed_index_id=deployed_index_id,
-                    queries=[query_embedding],
-                    num_neighbors=top_k,
-                    filter=filters if filters else None
-                )
+        # Multiple attempts with different methods
+        response = None
+        methods = ['public_match', 'match', 'find_neighbors']
         
+        for method_name in methods:
+            try:
+                print(f"מנסה {method_name}...")
+                method = getattr(index_endpoint, method_name)
+                
+                response = method(
+                    deployed_index_id=deployed_index_id,
+                    queries=[query_embedding],
+                    num_neighbors=top_k,
+                    filter=filters if filters else None
+                )
+                print(f"✓ הצליח עם {method_name}")
+                break
+                
+            except Exception as e:
+                print(f"✗ {method_name} failed: {str(e)[:100]}...")
+                if method_name == methods[-1]:  # Last method
+                    raise e
+                continue
+
         # 6. עיבוד התוצאות
         results = []
         if response:
@@ -557,49 +503,6 @@ def simple_rag_search_fixed(
         print(f"סוג השגיאה: {type(e)}")
         return []
  
-def alternative_search_method(
-    query: str,
-    top_k: int = 5,
-    population: Optional[str] = None,
-    code_maane: Optional[str] = None
-) -> List[Dict]:
-    """
-    שיטת חיפוש אלטרנטיבית באמצעות המחלקה שיצרת
-    """
-    try:
-        # שימוש במחלקה המקורית שלך
-        from your_original_file import VertexAIVectorSearch  # החלף לשם הקובץ שלך
-        
-        vector_search = VertexAIVectorSearch(
-            project_id=project_id,
-            location=location,
-            bucket_name="gap-vector-search"
-        )
-        
-        # מציאת המשאבים הקיימים
-        vector_search.get_existing_index_and_endpoint()
-        
-        if not vector_search.deployed_index_id:
-            raise ValueError("לא נמצא אינדקס פרוס")
-        
-        # ביצוע החיפוש
-        results = vector_search.search(
-            query=query,
-            population=population,
-            code_maane=code_maane,
-            top_k=top_k
-        )
-        
-        # הוספת אחוזי דמיון
-        for result in results:
-            result["similarity_percent"] = f"{result['similarity'] * 100:.1f}%"
-        
-        return results
-        
-    except Exception as e:
-        print(f"שגיאה בשיטה האלטרנטיבית: {e}")
-        return []
- 
 def check_dependencies():
     """בדיקת גרסאות הספריות"""
     try:
@@ -618,9 +521,7 @@ def check_dependencies():
             
     except Exception as e:
         print(f"שגיאה בבדיקת dependencies: {e}")
- 
- 
- 
+  
  
  
 def main():
@@ -647,7 +548,8 @@ def main():
         print("מבצע חיפוש...")
         
         # ניסיון ראשון - הפונקציה המתוקנת
-        results = simple_rag_search_fixed("מידע על שירותים דיגיטליים", top_k=3)
+        results = simple_rag_search_fixed("מהם עקרונות היסוד של פיזיקה קוונטית?", top_k=30)
+        #results = simple_rag_search_fixed("מידע על שירותים דיגיטליים", top_k=3)
         
         if results:
             print("החיפוש הצליח!")
@@ -663,7 +565,7 @@ def main():
             print("\nNo existing index found. Creating new index...")
             
             # טעינת המסמכים
-            data_file = "files/data.json"
+            data_file = "files/data.txt"
             documents = load_document(data_file)
             print(f"Loaded {len(documents)} documents")
             

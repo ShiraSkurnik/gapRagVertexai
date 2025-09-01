@@ -30,7 +30,7 @@ def create_embedding_model_config():
         logger.info("Creating RAG embedding model configuration")
         embedding_model_config = rag.RagEmbeddingModelConfig(
             vertex_prediction_endpoint=rag.VertexPredictionEndpoint(
-                publisher_model="publishers/google/models/text-embedding-005"
+                publisher_model="publishers/google/models/text-multilingual-embedding-002"
             )
         )
         logger.info("RAG embedding model configuration created successfully")
