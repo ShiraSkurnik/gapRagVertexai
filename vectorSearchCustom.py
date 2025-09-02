@@ -1,88 +1,171 @@
+"""
+Vertex AI Vector Search RAG System
+A clean implementation for document indexing and retrieval with metadata filtering
+"""
+
+import json
+import os
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+from dotenv import load_dotenv
 from google.cloud import aiplatform, storage
 from google.cloud.aiplatform import MatchingEngineIndex, MatchingEngineIndexEndpoint
-from vertexai.language_models import TextEmbeddingModel
-from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from dotenv import load_dotenv
-from pathlib import Path
-import numpy as np
-import os
-import json
-import hashlib
-from datetime import datetime
-from typing import List, Optional,Dict
-import time
- 
-# אתחול GCP
-load_dotenv()
- 
-project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gapmaanim")
-location = "europe-west4"
-aiplatform.init(project=project_id, location=location)
- 
-# אתחול המודל של Vertex AI
-model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
- 
-# אתחול חיבור ל-Cloud Storage
-storage_client = storage.Client()
- 
-# הגדרות Vertex AI Vector Search
-BUCKET_NAME = "gap-vector-search"
-INDEX_DISPLAY_NAME = "gap-rag-txt-index"
-INDEX_ENDPOINT_DISPLAY_NAME = "gap-rag-txt-endpoint"
-DIMENSIONS = 3072  # גודל הוקטורים של gemini-embedding-001
- 
-class VertexAIVectorSearch:
-    """מחלקה לניהול Vertex AI Vector Search"""
+from langchain_core.documents import Document
+from vertexai.language_models import TextEmbeddingModel
+
+
+class VertexAIVectorSearchRAG:
+    """A comprehensive RAG system using Vertex AI Vector Search"""
     
-    def __init__(self, project_id: str, location: str, bucket_name: str):
-        self.project_id = project_id
+    def __init__(self, project_id: str = None, location: str = "europe-west4", bucket_name: str = "gap-vector-search"):
+        """Initialize the RAG system"""
+        load_dotenv()
+        
+        self.project_id = project_id or os.getenv("GOOGLE_CLOUD_PROJECT", "gapmaanim")
         self.location = location
         self.bucket_name = bucket_name
+        
+        # Constants
+        self.INDEX_DISPLAY_NAME = "gap-rag-txt-index"
+        self.INDEX_ENDPOINT_DISPLAY_NAME = "gap-rag-txt-endpoint"
+        self.DIMENSIONS = 3072  # gemini-embedding-001 dimensions
+        
+        # Initialize GCP services
+        aiplatform.init(project=self.project_id, location=self.location)
+        self.embedding_model = TextEmbeddingModel.from_pretrained("gemini-embedding-001")
         self.storage_client = storage.Client()
+        
+        # Vector search components
         self.index = None
         self.index_endpoint = None
         self.deployed_index_id = None
- 
-    def prepare_embeddings_for_index(self, documents: List[Document], embeddings: List) -> str:
-        """
-        הכנת קובץ embeddings בפורמט הנדרש עבור Vertex AI Vector Search
+    
+    def load_documents(self, file_path: str) -> List[Document]:
+        """Load and process documents from JSON or TXT files"""
+        documents = []
+        file_ext = Path(file_path).suffix.lower()
         
-        פורמט נדרש: JSONL עם id, embedding, ו-restricts/crowding_tag
-        """
+        try:
+            if file_ext == '.json':
+                documents = self._load_json_documents(file_path)
+            elif file_ext == '.txt':
+                documents = self._load_text_documents(file_path)
+            else:
+                raise ValueError(f"Unsupported file type: {file_ext}")
+                
+            print(f"Loaded {len(documents)} documents from {file_path}")
+            return documents
+            
+        except Exception as e:
+            print(f"Error loading document {file_path}: {e}")
+            return []
+    
+    def _load_json_documents(self, file_path: str) -> List[Document]:
+        """Load documents from JSON file"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        documents = []
+        for i, item in enumerate(data):
+            # Assign population based on index
+            if i < 1:
+                population = "מוסד"
+            elif i < 20:
+                population = "רשות"
+            else:
+                population = "מחז"
+            
+            content = json.dumps(item, indent=2, ensure_ascii=False)
+            metadata = {
+                "population": population,
+                "type": "json",
+                "code_maane": str(item.get("קוד_מענה", "")),
+                "index": i
+            }
+            
+            documents.append(Document(page_content=content, metadata=metadata))
+        
+        return documents
+    
+    def _load_text_documents(self, file_path: str) -> List[Document]:
+        """Load documents from text file with chunking"""
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        chunks = text_splitter.split_text(content)
+        
+        documents = []
+        for i, chunk in enumerate(chunks):
+            # Assign population based on chunk index
+            if i < 2:
+                population = "מוסד"
+            elif i < 4:
+                population = "רשות"
+            else:
+                population = "מחז"
+            
+            metadata = {
+                "type": "txt",
+                "chunk_index": i,
+                "source": Path(file_path).name,
+                "population": population
+            }
+            
+            documents.append(Document(page_content=chunk, metadata=metadata))
+        
+        return documents
+    
+    def create_embeddings(self, documents: List[Document]) -> List:
+        """Generate embeddings for documents"""
+        if not documents:
+            raise ValueError("No documents provided")
+        
+        print(f"Creating embeddings for {len(documents)} documents...")
+        embeddings = self.embedding_model.get_embeddings(
+            [doc.page_content for doc in documents],
+            output_dimensionality=self.DIMENSIONS
+        )
+        return embeddings
+    
+    def prepare_embeddings_for_index(self, documents: List[Document], embeddings: List) -> str:
+        """Prepare embeddings in the required format for Vertex AI Vector Search"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"index_data/embeddings_{timestamp}.jsonl"
         
-        # יצירת bucket אם לא קיים
         bucket = self.storage_client.bucket(self.bucket_name)
-        
-        # הכנת הנתונים
         data_lines = []
+        
         for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
-            # המרת metadata לפורמט restricts
+            # Create metadata filters
             restricts = []
             
-            # הוספת population כ-restrict
             if 'population' in doc.metadata:
                 restricts.append({
                     "namespace": "population",
                     "allow": [doc.metadata['population']]
                 })
             
-            # הוספת code_maane כ-restrict
             if 'code_maane' in doc.metadata:
                 restricts.append({
                     "namespace": "code_maane",
                     "allow": [doc.metadata['code_maane']]
                 })
             
-            # יצירת אובייקט לאינדקס
             index_item = {
                 "id": str(i),
-                "embedding": embedding.values,  # הוקטור
-                "restricts": restricts,  # metadata לסינון
-                "crowding_tag": doc.metadata.get('population', 'general'),  # לפיזור תוצאות
-                # שמירת התוכן והמטאדאטה המלא בשדה נוסף
+                "embedding": embedding.values,
+                "restricts": restricts,
+                "crowding_tag": doc.metadata.get('population', 'general'),
                 "original_data": {
                     "content": doc.page_content,
                     "metadata": doc.metadata
@@ -91,28 +174,27 @@ class VertexAIVectorSearch:
             
             data_lines.append(json.dumps(index_item))
         
-        # העלאת הקובץ ל-GCS
+        # Upload to Cloud Storage
         blob = bucket.blob(output_path)
         blob.upload_from_string('\n'.join(data_lines))
         
-        print(f"Uploaded {len(data_lines)} embeddings to gs://{self.bucket_name}/{output_path}")
-        return f"gs://{self.bucket_name}/{output_path}"
- 
+        gcs_uri = f"gs://{self.bucket_name}/{output_path}"
+        print(f"Uploaded {len(data_lines)} embeddings to {gcs_uri}")
+        return gcs_uri
+    
     def create_index(self, embeddings_gcs_uri: str) -> MatchingEngineIndex:
-        """יצירת אינדקס חדש"""
-        
+        """Create a new Vector Search index"""
         print("Creating new Vector Search index...")
         
-        # יצירת האינדקס עם הפרמטרים הנכונים
         index = aiplatform.MatchingEngineIndex.create_tree_ah_index(
-            display_name=INDEX_DISPLAY_NAME,
+            display_name=self.INDEX_DISPLAY_NAME,
             contents_delta_uri=embeddings_gcs_uri,
-            dimensions=DIMENSIONS,
-            approximate_neighbors_count=100,  # מספר השכנים לחיפוש
-            distance_measure_type="COSINE_DISTANCE",  # או "DOT_PRODUCT_DISTANCE"
-            leaf_node_embedding_count=1000,  # מספר embeddings לכל צומת
-            leaf_nodes_to_search_percent=7,  # אחוז הצמתים לסריקה
-            description="RAG index for GAP documents with metadata filtering",
+            dimensions=self.DIMENSIONS,
+            approximate_neighbors_count=100,
+            distance_measure_type="COSINE_DISTANCE",
+            leaf_node_embedding_count=1000,
+            leaf_nodes_to_search_percent=7,
+            description="RAG index for documents with metadata filtering",
             labels={
                 "environment": "production",
                 "use_case": "rag"
@@ -124,490 +206,541 @@ class VertexAIVectorSearch:
         return index
     
     def create_index_endpoint(self) -> MatchingEngineIndexEndpoint:
-        """יצירת endpoint לאינדקס"""
-        
+        """Create an index endpoint"""
         print("Creating index endpoint...")
-        network=f"projects/{self.project_id}/global/networks/default"
-        print(f"index endpoint network: {network}")
         
         index_endpoint = aiplatform.MatchingEngineIndexEndpoint.create(
-            display_name=INDEX_ENDPOINT_DISPLAY_NAME,
-            description="Endpoint for GAP RAG index",
-            public_endpoint_enabled=True,  # אפשר גישה ציבורית
-            # network = network,  # Add explicit network
+            display_name=self.INDEX_ENDPOINT_DISPLAY_NAME,
+            description="Endpoint for RAG index",
+            public_endpoint_enabled=True,
             labels={
                 "environment": "production",
-                "use_case": "rag"
+                "use_case": "rag",
+                "access": "public"
             }
         )
         
         print(f"Index endpoint created: {index_endpoint.resource_name}")
         self.index_endpoint = index_endpoint
         return index_endpoint
- 
-    def deploy_index(self, index: MatchingEngineIndex, index_endpoint: MatchingEngineIndexEndpoint):
-        """פריסת האינדקס ל-endpoint"""
     
-        print("Deploying index to endpoint...")
-        
-        # בדיקה אם האינדקס כבר פרוס
-        deployed_indexes = index_endpoint.deployed_indexes
-        for deployed in deployed_indexes:
-            if deployed.index == index.resource_name:
-                print(f"Index is already deployed with ID: {deployed.id}")
-                self.deployed_index_id = deployed.id
-                return
-        
-        # יצירת ID ייחודי לפריסה
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        deployed_id = f"deployed_{INDEX_DISPLAY_NAME.replace('-', '_')}_{timestamp}"
-        
-        # אם יש כבר פריסות אחרות באותו endpoint, בדיקה של ה-IDs שלהן
-        existing_ids = [d.id for d in deployed_indexes]
-        if existing_ids:
-            print(f"Existing deployed IDs: {existing_ids}")
-        
-        # סוגי מכונות לנסות
-        machine_types = [
-            "e2-standard-16",   # מומלץ ל-MEDIUM shard
-            "e2-highmem-16",    # אלטרנטיבה עם יותר זיכרון
-            "e2-standard-8",    # אם המכונות הגדולות לא זמינות
-            "n2d-standard-8",   # מכונה מבוססת AMD
-        ]
-        
-        for machine_type in machine_types:
-            try:
-                print(f"Attempting to deploy with machine type: {machine_type}")
-                
-                deployed_index = index_endpoint.deploy_index(
-                    index=index,
-                    deployed_index_id=deployed_id,
-                    display_name=f"Deployed {INDEX_DISPLAY_NAME}",
-                    machine_type=machine_type,
-                    min_replica_count=1,
-                    max_replica_count=2,
-                    #enable_access_logging=False,  # Add this
-                    #deployed_index_auth_config=None,  # Add this for public access
-                )
-                
-                self.deployed_index_id = deployed_id
-                print(f"✓ Index deployed successfully!")
-                print(f"  - Deployed ID: {deployed_id}")
-                print(f"  - Machine type: {machine_type}")
-                print(f"  - Status: Deployment initiated")
-                
-                # המתנה קצרה ובדיקת סטטוס
-                print("\nWaiting for deployment to be ready...")
-                for i in range(12):  # בדיקה כל 30 שניות למשך 6 דקות
-                    time.sleep(30)
-                    
-                    # רענון מידע על ה-endpoint
-                    index_endpoint = aiplatform.MatchingEngineIndexEndpoint(
-                        index_endpoint_name=index_endpoint.resource_name
-                    )
-                    
-                    # בדיקה אם הפריסה הושלמה
-                    for deployed in index_endpoint.deployed_indexes:
-                        if deployed.id == deployed_id:
-                            print(f"✓ Deployment confirmed! Index is ready for queries.")
-                            return
-                    
-                    print(f"  ... still deploying ({i+1}/12)")
-                
-                print("⚠ Deployment is taking longer than expected, but should complete soon.")
-                return
-                
-            except Exception as e:
-                error_msg = str(e)
-                print(f"✗ Failed with {machine_type}: {error_msg}")
-                
-                # אם הבעיה היא ID כפול, ננסה ID אחר
-                if "already exists" in error_msg:
-                    deployed_id = f"deployed_{INDEX_DISPLAY_NAME.replace('-', '_')}_{timestamp}_{machine_type.replace('-', '_')}"
-                    print(f"  Trying with alternative ID: {deployed_id}")
-                    continue
-        
-        raise Exception("Failed to deploy index with any machine type")
- 
-    def check_deployment_status(self):
-        """בדיקת סטטוס הפריסה"""
-        if not self.index_endpoint:
-            print("No endpoint found")
+    def deploy_index(self, machine_type: str = "e2-standard-16") -> bool:
+        """Deploy the index to the endpoint"""
+        if not self.index or not self.index_endpoint:
+            print("Index or endpoint not found")
             return False
         
+        print("Deploying index to endpoint...")
+        
+        # Check if already deployed
+        deployed_indexes = self.index_endpoint.deployed_indexes
+        for deployed in deployed_indexes:
+            if deployed.index == self.index.resource_name:
+                print(f"Index is already deployed with ID: {deployed.id}")
+                self.deployed_index_id = deployed.id
+                return True
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        deployed_id = f"deployed_{timestamp}"
+        
         try:
-            # רענון מידע
+            self.index_endpoint.deploy_index(
+                index=self.index,
+                deployed_index_id=deployed_id,
+                display_name=f"Deployed {self.INDEX_DISPLAY_NAME}",
+                machine_type=machine_type,
+                min_replica_count=1,
+                max_replica_count=2,
+            )
+            
+            self.deployed_index_id = deployed_id
+            print(f"Index deployed successfully with ID: {deployed_id}")
+            
+            # Wait for deployment to be ready
+            self._wait_for_deployment(deployed_id)
+            return True
+            
+        except Exception as e:
+            print(f"Deployment failed: {e}")
+            return False
+    
+    def _wait_for_deployment(self, deployed_id: str, max_wait_minutes: int = 10):
+        """Wait for deployment to be ready"""
+        print("Waiting for deployment to be ready...")
+        
+        for i in range(max_wait_minutes * 2):  # Check every 30 seconds
+            time.sleep(30)
+            
+            # Refresh endpoint info
             endpoint = aiplatform.MatchingEngineIndexEndpoint(
                 index_endpoint_name=self.index_endpoint.resource_name
             )
             
-            deployed_indexes = endpoint.deployed_indexes
-            if not deployed_indexes:
-                print("No deployed indexes found")
-                return False
+            for deployed in endpoint.deployed_indexes:
+                if deployed.id == deployed_id:
+                    print("✓ Deployment completed and ready!")
+                    return
             
-            print(f"\nDeployment Status:")
-            print(f"Endpoint: {endpoint.display_name}")
-            print(f"Number of deployed indexes: {len(deployed_indexes)}")
-            
-            for deployed in deployed_indexes:
-                print(f"\nDeployed Index ID: {deployed.id}")
-                print(f"Index Resource: {deployed.index}")
-                print(f"Display Name: {deployed.display_name}")
-                
-                # בדיקה אם זה האינדקס שלנו
-                if self.index and deployed.index == self.index.resource_name:
-                    self.deployed_index_id = deployed.id
-                    print("✓ This is our index - ready for searches!")
-                    return True
-            
-            return False
-            
-        except Exception as e:
-            print(f"Error checking status: {e}")
-            return False
-            
-    def get_existing_index_and_endpoint(self):
-        """מציאת אינדקס ו-endpoint קיימים"""
-        # חיפוש אינדקס קיים
+            print(f"  ... still deploying ({i+1}/{max_wait_minutes * 2})")
+        
+        print("⚠ Deployment is taking longer than expected")
+    
+    def find_existing_resources(self):
+        """Find existing index and endpoint"""
+        # Find existing index
         indexes = aiplatform.MatchingEngineIndex.list(
-            filter=f'display_name="{INDEX_DISPLAY_NAME}"'
+            filter=f'display_name="{self.INDEX_DISPLAY_NAME}"'
         )
         
         if indexes:
             self.index = indexes[0]
-            print(f"Found existing index: {self.index.resource_name}")
+            print(f"Found existing index: {self.index.display_name}")
         
-        # חיפוש endpoint קיים
+        # Find existing endpoint
         endpoints = aiplatform.MatchingEngineIndexEndpoint.list(
-            filter=f'display_name="{INDEX_ENDPOINT_DISPLAY_NAME}"'
+            filter=f'display_name="{self.INDEX_ENDPOINT_DISPLAY_NAME}"'
         )
         
         if endpoints:
             self.index_endpoint = endpoints[0]
-            print(f"Found existing endpoint: {self.index_endpoint.resource_name}")
+            print(f"Found existing endpoint: {self.index_endpoint.display_name}")
             
-            # בדיקה אם האינדקס פרוס
+            # Check if index is deployed
             deployed_indexes = self.index_endpoint.deployed_indexes
-            if deployed_indexes:
-                # חיפוש האינדקס הפרוס שלנו
-                for deployed in deployed_indexes:
-                    if self.index and deployed.index == self.index.resource_name:
-                        self.deployed_index_id = deployed.id
-                        print(f"Found deployed index: {self.deployed_index_id}")
-                        print(f"Deployment is ready and operational!")
-                        return
-                
-                # אם יש אינדקסים פרוסים אבל לא של האינדקס שלנו
-                print(f"Found {len(deployed_indexes)} deployed indexes, but none match our index")
-                print("Will need to deploy our index with a new ID")
-            else:
-                print("Endpoint found, but no indexes are deployed yet.")
-                if self.index:
-                    print("Will deploy the index...")
-                    self.deploy_index(self.index, self.index_endpoint)
-
- 
-def load_document(file_path: str) -> List[Document]:
-    """Load and process document based on file type"""
-    documents = []
-    file_ext = Path(file_path).suffix.lower()
-    try:
-        if file_ext == '.json':
-            # Load JSON file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            for i, item in enumerate(data):
-                if i < 1:
-                    population = "מוסד"
-                elif i < 20:
-                    population = "רשות"
-                else:
-                    population = "מחז"
- 
-                content = json.dumps(item, indent=2, ensure_ascii=False)
- 
-                metadata = {
-                    "population": population,
-                    "type": "json",
-                    "code_maane": str(item.get("קוד_מענה", "")),
-                    "index": i
-                }
- 
-                documents.append(Document(page_content=content, metadata=metadata))
-        elif file_ext == '.txt':
-            # Load text file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # פיצול הטקסט ל־chunks עם חפיפה
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
+            for deployed in deployed_indexes:
+                if self.index and deployed.index == self.index.resource_name:
+                    self.deployed_index_id = deployed.id
+                    print(f"Found deployed index: {self.deployed_index_id}")
+                    return True
+        
+        return False
+    
+    def check_deployment_status(self):
+        """Check if the deployed index is ready"""
+        if not self.index_endpoint or not self.deployed_index_id:
+            return False
+        
+        try:
+            # Try to get endpoint info
+            endpoint = aiplatform.MatchingEngineIndexEndpoint(
+                index_endpoint_name=self.index_endpoint.resource_name
             )
- 
-            chunks = text_splitter.split_text(content)
- 
-            for i, chunk in enumerate(chunks):
-                if i < 2:
-                    population = "מוסד"
-                elif i < 4:
-                    population = "רשות"
-                else:
-                    population = "מחז"
-                metadata = {
-                    "type": "txt",
-                    "chunk_index": i,
-                    "source": Path(file_path).name,
-                    "population": population
-                }   
-                documents.append(Document(page_content=chunk, metadata=metadata))
-
-    except Exception as e:
-        print(f"Error loading document {file_path}: {e}")
-        
-    return documents
- 
- 
-def create_embeddings(documents: List[Document]):
-    """Create embeddings for the documents using Vertex AI"""
-    if not documents:
-        raise ValueError("No documents provided")
+            
+            for deployed in endpoint.deployed_indexes:
+                if deployed.id == self.deployed_index_id:
+                    print(f"Deployed index found: {deployed.id}")
+                    # Check if there's a state or status field
+                    print(f"Deployed index details: {deployed}")
+                    return True
+            
+            print("Deployed index not found")
+            return False
+            
+        except Exception as e:
+            print(f"Error checking deployment status: {e}")
+            return False
     
-    # Get embeddings using Vertex AI model
-    embeddings = model.get_embeddings(
-        [doc.page_content for doc in documents],
-        output_dimensionality=DIMENSIONS
-    )
-    return documents, embeddings
- 
-def simple_rag_search_fixed(
-    query: str,
-    top_k: int = 5,
-    population: Optional[str] = None,
-    code_maane: Optional[str] = None
-) -> List[Dict]:
-    """
-    פונקצית חיפוש מתוקנת ב-RAG
-    """
+    def search(self, query: str, top_k: int = 5, population: Optional[str] = None, 
+               code_maane: Optional[str] = None) -> List[Dict]:
+        """Search for similar documents"""
+        if not self.index_endpoint or not self.deployed_index_id:
+            print("System not ready. Please run setup first.")
+            return []
+        
+        try:
+            # Create query embedding
+            print(f"Searching for: '{query}'")
+            query_embedding = self.embedding_model.get_embeddings(
+                [query], output_dimensionality=self.DIMENSIONS
+            )[0].values
+            
+            # Build filters
+            filters = []
+            if population:
+                filters.append({
+                    "namespace": "population",
+                    "allow_list": [population]
+                })
+            
+            if code_maane:
+                filters.append({
+                    "namespace": "code_maane",
+                    "allow_list": [code_maane]
+                })
+            
+            # Perform search
+            response = self.index_endpoint.find_neighbors(
+                deployed_index_id=self.deployed_index_id,
+                queries=[query_embedding],
+                num_neighbors=top_k
+            )
+            
+            # Process results
+            results = []
+            if response and len(response) > 0:
+                for neighbor in response[0]:
+                    similarity_score = 1 - neighbor.distance
+                    
+                    result = {
+                        "id": neighbor.id,
+                        "distance": neighbor.distance,
+                        "similarity": similarity_score,
+                        "similarity_percent": f"{similarity_score * 100:.1f}%"
+                    }
+                    results.append(result)
+            
+            print(f"Found {len(results)} results")
+            return results
+            
+        except Exception as e:
+            print(f"Search error: {e}")
+            return []
     
-    try:
-        # 1. מציאת ה-endpoint הקיים
-        print("מחפש את ה-endpoint...")
-        endpoints = aiplatform.MatchingEngineIndexEndpoint.list(
-            filter=f'display_name="{INDEX_ENDPOINT_DISPLAY_NAME}"'
-        )
+    def setup_from_file(self, file_path: str) -> bool:
+        """Complete setup process from a document file"""
+        print("Starting setup process...")
         
-        if not endpoints:
-            raise ValueError("לא נמצא endpoint. וודא שהטעינה הושלמה בהצלחה.")
+        # Check for existing resources first
+        if self.find_existing_resources():
+            print("✓ System is already set up and ready!")
+            return True
         
-        # יצירת אובייקט endpoint מחדש עם resource name מפורש
-        endpoint_resource_name = endpoints[0].resource_name
-        print(f"נמצא endpoint: {endpoint_resource_name}")
-        
-        # Force refresh the endpoint to get latest network configuration
-        index_endpoint = aiplatform.MatchingEngineIndexEndpoint(
-            index_endpoint_name=endpoint_resource_name
-        )      
-
-        # וודא שיש gRPC endpoint מוגדר
-        if hasattr(index_endpoint._gca_resource, 'private_service_connect_config'):
-            print("Using private service connect configuration")
-        elif hasattr(index_endpoint._gca_resource, 'public_endpoint_domain_name'):
-            print(f"Using public endpoint: {index_endpoint._gca_resource.public_endpoint_domain_name}")
-        
-        # 2. מציאת האינדקס הפרוס
-        deployed_indexes = index_endpoint.deployed_indexes
-        if not deployed_indexes:
-            raise ValueError("לא נמצא אינדקס פרוס. וודא שהפריסה הושלמה.")
-        
-        deployed_index_id = deployed_indexes[0].id
-        print(f"משתמש באינדקס: {deployed_index_id}")
-        
-        # 3. יצירת embedding לשאילתא
-        print(f"יוצר embedding עבור: '{query}'")
-        query_embedding = model.get_embeddings(
-            [query],
-            output_dimensionality=DIMENSIONS
-        )[0].values
-        # Add debugging
-        print(f"Query embedding length: {len(query_embedding)}")
-        print(f"Query embedding first 5 values: {query_embedding[:5]}")
-
-        # 4. בניית פילטרים אם נדרש
-        filters = []
-        if population:
-            filters.append({
-                "namespace": "population",
-                "allow_list": [population]
-            })
-            print(f"מסנן לפי אוכלוסייה: {population}")
+        try:
+            # Load documents
+            documents = self.load_documents(file_path)
+            if not documents:
+                print("No documents loaded. Aborting setup.")
+                return False
             
-        if code_maane:
-            filters.append({
-                "namespace": "code_maane",
-                "allow_list": [code_maane]
-            })
-            print(f"מסנן לפי קוד מענה: {code_maane}")
-        
-        # 5. ביצוע החיפוש בדרך המתוקנת
-        print("מבצע חיפוש...")
-        #print(index_endpoint._gca_resource.network_endpoint)
-
-        # Multiple attempts with different methods
-        response = None
-        methods = ['public_match', 'match', 'find_neighbors']
-        
-        for method_name in methods:
-            try:
-                print(f"מנסה {method_name}...")
-                method = getattr(index_endpoint, method_name)
-                
-                response = method(
-                    deployed_index_id=deployed_index_id,
-                    queries=[query_embedding],
-                    num_neighbors=top_k,
-                    filter=filters if filters else None
-                )
-                print(f"✓ הצליח עם {method_name}")
-                break
-                
-            except Exception as e:
-                print(f"✗ {method_name} failed: {str(e)[:100]}...")
-                if method_name == methods[-1]:  # Last method
-                    raise e
-                continue
-
-        # 6. עיבוד התוצאות
-        results = []
-        if response:
-            neighbor_list = response[0] if isinstance(response, list) else response
+            # Create embeddings
+            embeddings = self.create_embeddings(documents)
             
-            for neighbor in neighbor_list:
-                similarity_score = 1 - neighbor.distance
-                
-                result = {
-                    "id": neighbor.id,
-                    "distance": neighbor.distance,
-                    "similarity": similarity_score,
-                    "similarity_percent": f"{similarity_score * 100:.1f}%"
-                }
-                results.append(result)
-        
-        print(f"נמצאו {len(results)} תוצאות")
-        return results
-        
-    except Exception as e:
-        print(f"שגיאה בחיפוש: {e}")
-        print(f"סוג השגיאה: {type(e)}")
-        return []
- 
-def check_dependencies():
-    """בדיקת גרסאות הספריות"""
-    try:
-        import google.cloud.aiplatform
-        print(f"google-cloud-aiplatform version: {google.cloud.aiplatform.__version__}")
-        
-        import vertexai
-        print(f"google-cloud-aiplatform installed")
-        
-        # בדיקת חיבור
-        endpoints = aiplatform.MatchingEngineIndexEndpoint.list()
-        print(f"נמצאו {len(endpoints)} endpoints")
-        
-        for endpoint in endpoints:
-            print(f"  - {endpoint.display_name}: {endpoint.resource_name}")
+            # Prepare for indexing
+            embeddings_uri = self.prepare_embeddings_for_index(documents, embeddings)
             
-    except Exception as e:
-        print(f"שגיאה בבדיקת dependencies: {e}")
+            # Create index if needed
+            if not self.index:
+                self.create_index(embeddings_uri)
+            
+            # Create endpoint if needed
+            if not self.index_endpoint:
+                self.create_index_endpoint()
+            
+            # Deploy index
+            if not self.deployed_index_id:
+                self.deploy_index()
+            
+            print("✓ Setup completed successfully!")
+            return True
+            
+        except Exception as e:
+            print(f"Setup failed: {e}")
+            return False
+
   
- 
- 
-def main():
-    """פונקציה ראשית מעודכנת"""
-    
-    # יצירת אינסטנס של Vector Search
-    vector_search = VertexAIVectorSearch(
-        project_id=project_id,
-        location=location,
-        bucket_name=BUCKET_NAME
-    )
-    
-    # בדיקה אם יש אינדקס קיים
-    vector_search.get_existing_index_and_endpoint()
-    
-    # בדיקת סטטוס הפריסה
-    if vector_search.check_deployment_status():
-        print("\n✓ System is ready! Index is deployed and operational.")
-        # בדיקת גרסאות
-        print("בודק dependencies...")
-        check_dependencies()
+        """Test the simple search method"""
+        print("Testing simple search...")
         
-        print("\n" + "="*50)
-        print("מבצע חיפוש...")
-        
-        # ניסיון ראשון - הפונקציה המתוקנת
-        results = simple_rag_search_fixed("מהם עקרונות היסוד של פיזיקה קוונטית?", top_k=30)
-        #results = simple_rag_search_fixed("מידע על שירותים דיגיטליים", top_k=3)
+        # Test with Hebrew query
+        results = self.search2("פיזיקה", top_k=3)
         
         if results:
-            print("החיפוש הצליח!")
+            print("SUCCESS! Found results:")
             for i, result in enumerate(results, 1):
-                print(f"  {i}. ID: {result['id']}, דמיון: {result['similarity_percent']}")
+                print(f"  {i}. ID: {result['id']}, Similarity: {result['similarity_percent']}")
+            return True
         else:
-            print("החיפוש לא הצליח, מנסה שיטה אלטרנטיבית...")
-            # ננסה את השיטה האלטרנטיבית
-            # results = alternative_search_method("מידע על שירותים דיגיטליים", top_k=3)    
-    else:
-        # אם אין אינדקס, יצירת חדש
-        if not vector_search.index:
-            print("\nNo existing index found. Creating new index...")
+            print("No results found")
             
-            # טעינת המסמכים
-            data_file = "files/data.txt"
-            documents = load_document(data_file)
-            print(f"Loaded {len(documents)} documents")
+            # Try with English
+            print("Trying with English query...")
+            results = self.search2("physics quantum", top_k=3)
+            if results:
+                print("SUCCESS with English!")
+                for i, result in enumerate(results, 1):
+                    print(f"  {i}. ID: {result['id']}, Similarity: {result['similarity_percent']}")
+                return True
             
-            # יצירת embeddings
-            splits, embeddings = create_embeddings(documents)
-            
-            # הכנת הנתונים לאינדקס
-            embeddings_uri = vector_search.prepare_embeddings_for_index(splits, embeddings)
-            
-            # יצירת האינדקס
-            index = vector_search.create_index(embeddings_uri)
-            vector_search.index = index
+            return False
+    def check_endpoint_config(self):
+        """Check if endpoint has public access"""
+        if not self.index_endpoint:
+            print("No endpoint found")
+            return
         
-        # יצירת endpoint אם אין
-        if not vector_search.index_endpoint:
-            index_endpoint = vector_search.create_index_endpoint()
-            vector_search.index_endpoint = index_endpoint
+        print("Endpoint configuration:")
+        print(f"Resource name: {self.index_endpoint.resource_name}")
+        print(f"Display name: {self.index_endpoint.display_name}")
         
-        # פריסת האינדקס אם לא פרוס
-        if not vector_search.deployed_index_id and vector_search.index and vector_search.index_endpoint:
-            vector_search.deploy_index(vector_search.index, vector_search.index_endpoint)
-    
-        # בדיקה סופית שהכל מוכן
-        if not vector_search.deployed_index_id:
-            print("\n⚠ Warning: Index deployment may still be in progress.")
-            print("You can run the script again in a few minutes to check status.")
+        # Check if public endpoint is enabled
+        try:
+            endpoint_info = self.index_endpoint.to_dict()
+            print(f"Endpoint details: {endpoint_info}")           
+        except Exception as e:
+            print(f"Error checking endpoint config: {e}")
+
+    def search(self, query: str, top_k: int = 5, population: Optional[str] = None, 
+            code_maane: Optional[str] = None) -> List[Dict]:
+        """Search using the correct API structure"""
+        if not self.index_endpoint or not self.deployed_index_id:
+            print("System not ready. Please run setup first.")
+            return []
+        
+        try:
+            # Create query embedding
+            print(f"Searching for: '{query}'")
+            query_embedding = self.embedding_model.get_embeddings(
+                [query], output_dimensionality=self.DIMENSIONS
+            )[0].values
             
-            # אפשרות לבדוק שוב
-            user_input = input("\nDo you want to wait and check again? (y/n): ")
-            if user_input.lower() == 'y':
-                print("Waiting 2 minutes before checking again...")
-                time.sleep(120)
-                if vector_search.check_deployment_status():
-                    print("\n✓ Deployment completed successfully!")
-                else:
-                    print("\n⚠ Deployment still in progress. Please try again later.")
-                    return
+            print(f"Query embedding dimension: {len(query_embedding)}")
+            
+            # Use the correct v1 API with proper imports
+            from google.cloud.aiplatform_v1.services.match_service import MatchServiceClient
+            from google.cloud.aiplatform_v1.types import FindNeighborsRequest
+            
+            # Create client
+            client = MatchServiceClient()
+            
+            # Get endpoint name
+            endpoint_name = self.index_endpoint.resource_name
+            print(f"Using endpoint: {endpoint_name}")
+            print(f"Using deployed index: {self.deployed_index_id}")
+            
+            # Create the request with the correct structure
+            # Based on the actual API documentation structure
+            queries = [
+                {
+                    "datapoint": {
+                        "datapoint_id": "query_0",
+                        "feature_vector": query_embedding
+                    },
+                    "neighbor_count": top_k
+                }
+            ]
+            
+            request = FindNeighborsRequest(
+                index_endpoint=endpoint_name,
+                deployed_index_id=self.deployed_index_id,
+                queries=queries
+            )
+            
+            print("Executing search...")
+            response = client.find_neighbors(request=request)
+            
+            print(f"Response received: {type(response)}")
+            
+            # Process results
+            results = []
+            if hasattr(response, 'nearest_neighbors') and response.nearest_neighbors:
+                neighbors_list = response.nearest_neighbors[0]
+                if hasattr(neighbors_list, 'neighbors'):
+                    neighbors = neighbors_list.neighbors
+                    print(f"Found {len(neighbors)} neighbors")
+                    
+                    for neighbor in neighbors:
+                        similarity = 1 - neighbor.distance
+                        neighbor_id = neighbor.datapoint.datapoint_id if hasattr(neighbor.datapoint, 'datapoint_id') else str(neighbor.datapoint)
+                        
+                        result = {
+                            "id": neighbor_id,
+                            "distance": neighbor.distance,
+                            "similarity": similarity,
+                            "similarity_percent": f"{similarity * 100:.1f}%"
+                        }
+                        results.append(result)
+                        print(f"  Result: ID={result['id']}, Similarity={result['similarity_percent']}")
             else:
-                return
- 
+                print("No neighbors found in response")
+            
+            print(f"Total results: {len(results)}")
+            return results
+            
+        except Exception as e:
+            print(f"API search failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Final fallback: Try a simple HTTP request
+            print("Trying direct HTTP request...")
+            return self._search_direct_http(query, top_k)
+
+    def _search_direct_http(self, query: str, top_k: int) -> List[Dict]:
+        """Direct HTTP request to Vector Search endpoint"""
+        try:
+            import requests
+            import json
+            
+            # Create embedding
+            query_embedding = self.embedding_model.get_embeddings([query])[0].values
+            
+            # Get access token from gcloud (this should work since gcloud auth list shows active account)
+            import subprocess
+            
+            # Get access token using gcloud
+            result = subprocess.run([
+                'gcloud', 'auth', 'print-access-token'
+            ], capture_output=True, text=True, shell=True)
+            
+            if result.returncode != 0:
+                print("Failed to get access token from gcloud")
+                return []
+            
+            access_token = result.stdout.strip()
+            print("Got access token from gcloud")
+            
+            # Get endpoint info
+            endpoint_info = self.index_endpoint.to_dict()
+            public_domain = endpoint_info.get('publicEndpointDomainName')
+            
+            if not public_domain:
+                print("No public domain available")
+                return []
+            
+            # Make direct API call
+            url = f"https://{public_domain}/v1/projects/{self.project_id}/locations/{self.location}/indexEndpoints/{self.index_endpoint.resource_name.split('/')[-1]}:findNeighbors"
+            
+            payload = {
+                "deployedIndexId": self.deployed_index_id,
+                "queries": [{
+                    "datapoint": {
+                        "datapointId": "query_0",
+                        "featureVector": query_embedding
+                    },
+                    "neighborCount": top_k
+                }]
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            }
+            
+            print(f"Making HTTP request to: {url}")
+            response = requests.post(url, json=payload, headers=headers)
+            
+            print(f"HTTP Response status: {response.status_code}")
+            print(f"Full HTTP Response: {response.text}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"HTTP Success! Response keys: {result.keys()}")
+                print(f"Full response content: {result}")
+                
+                results = []
+                # Try different possible response formats
+                if "nearestNeighbors" in result:
+                    neighbors = result["nearestNeighbors"][0].get("neighbors", [])
+                    print(f"Found {len(neighbors)} neighbors via HTTP")
+                elif "nearest_neighbors" in result:
+                    neighbors = result["nearest_neighbors"][0].get("neighbors", [])
+                    print(f"Found {len(neighbors)} neighbors via HTTP (snake_case)")
+                elif result:  # If there's any content but not in expected format
+                    print(f"Unexpected response format: {result}")
+                    neighbors = []
+                else:
+                    print("Empty response - this might indicate no matches found or wrong request format")
+                    neighbors = []
+                
+                for neighbor in neighbors:
+                    similarity = 1 - neighbor.get("distance", 1.0)
+                    results.append({
+                        "id": neighbor.get("datapoint", {}).get("datapointId", "unknown"),
+                        "distance": neighbor.get("distance", 1.0),
+                        "similarity": similarity,
+                        "similarity_percent": f"{similarity * 100:.1f}%"
+                    })
+                
+                # If we got an empty response, try with a simpler query
+                if not results and not result:
+                    print("Trying with a test embedding to see if endpoint responds...")
+                    test_embedding = [0.1] * self.DIMENSIONS
+                    test_payload = {
+                        "deployedIndexId": self.deployed_index_id,
+                        "queries": [{
+                            "datapoint": {
+                                "datapointId": "test_0",
+                                "featureVector": test_embedding
+                            },
+                            "neighborCount": 1
+                        }]
+                    }
+                    
+                    test_response = requests.post(url, json=test_payload, headers=headers)
+                    print(f"Test response status: {test_response.status_code}")
+                    print(f"Test response: {test_response.text}")
+                
+                return results
+            else:
+                print(f"HTTP request failed: {response.status_code} - {response.text}")
+                return []
+                
+        except Exception as e:
+            print(f"Direct HTTP request failed: {e}")
+            return []
+   
+def main():
+    """Main function to demonstrate the RAG system"""
+    # Initialize the system
+    rag_system = VertexAIVectorSearchRAG()
+
+     # Test embedding dimensions
+    test_embedding = rag_system.embedding_model.get_embeddings(["test"])
+    print(f"Actual embedding dimension: {len(test_embedding[0].values)}")
+
+    # Check if system is already set up
+    if rag_system.find_existing_resources():
+        print("✓ Found existing resources")
+        rag_system.check_endpoint_config()
+        print("Testing vector search...")
+        results = rag_system.search("פיזיקה קוונטית", top_k=3)
         
+        if results:
+            print("SUCCESS! Found results:")
+            for i, result in enumerate(results, 1):
+                print(f"  {i}. ID: {result['id']}, Similarity: {result['similarity_percent']}")
+        else:
+            print("Still no results found")
+
+        # Check deployment status
+        if rag_system.check_deployment_status():
+            print("✓ Deployment appears ready")
+            
+            # Test basic search
+            if rag_system.search("פיזיקה קוונטית"):
+                print("✓ Basic search working")
+            else:
+                print("✗ Basic search failed")
+        else:
+            print("✗ Deployment not ready")
+    else:
+        print("No existing resources found - need to run setup")
+
+    # Setup from file
+    data_file = "files/data.txt"  # Change this to your file path
+    
+    if rag_system.setup_from_file(data_file):
+        print("\n" + "="*50)
+        print("Testing search functionality...")
+        
+        # Test searches
+        test_queries = [
+            "מהם עקרונות היסוד של פיזיקה קוונטית?"           
+        ]
+        
+        for query in test_queries:
+            print(f"\nSearching: {query}")
+            results = rag_system.search(query, top_k=5)
+            
+            if results:
+                for i, result in enumerate(results, 1):
+                    print(f"  {i}. ID: {result['id']}, Similarity: {result['similarity_percent']}")
+            else:
+                print("  No results found")
+    
+    else:
+        print("Setup failed. Please check the logs for errors.")
+
+
 if __name__ == "__main__":
     main()
- 
- 

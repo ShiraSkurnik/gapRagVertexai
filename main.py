@@ -1,3 +1,5 @@
+# Vertex AI RAG Engine
+
 import os
 import json
 import logging
@@ -8,6 +10,9 @@ from vertexai.generative_models import GenerativeModel, Tool
 import vertexai
 import time
 from google.cloud import storage
+from pathlib import Path
+from langchain_core.documents import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -74,110 +79,133 @@ def get_or_create_rag_corpus(display_name: str, embedding_model_config):
         print(f"Error checking/creating RAG corpus: {str(e)}")
         raise
 
-def load_json_as_documents(json_file_path: str) -> List[Dict[str, Any]]:
-    """Load JSON file and convert each item to a document structure."""
+def load_documents(file_path: str) -> List[Document]:
+    """Load file and convert each item to a Document object."""
     try:
-        logger.info(f"Loading JSON file: {json_file_path}")
-        
-        with open(json_file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
+        file_ext = Path(file_path).suffix.lower()
         documents = []
+
+        if file_ext == '.json':
+            logger.info(f"Loading JSON file: {file_path}")
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            for i, item in enumerate(data):
+                content = f"שם מענה: {item['שם_מענה']}\nקוד מענה: {item['קוד_מענה']}\nתקציבים: {', '.join(item['תקציבים'])}\nאוכלוסיה: {item['אוכלוסיה']}"
+                print(content)
+                
+                metadata = {
+                    "population": str(item.get("אוכלוסיה", "")),
+                    "type": "json",
+                    "code_maane": str(item.get("קוד_מענה", "")),
+                    "index": i,
+                    "source": file_path  # Fixed: was using undefined json_file_path
+                }
+                
+                # Create Document object for consistency
+                documents.append(Document(page_content=content, metadata=metadata))
         
-        for i, item in enumerate(data):
-            # Determine population based on index (as per your logic)
-            # if i < 1:
-            #     population = "מוסד"
-            # elif i < 20:
-            #     population = "רשות"
-            # else:
-            #     population = "מחוז"
+        elif file_ext == '.txt':
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
             
-            # Convert item to JSON string for content
-            # content = json.dumps(item, indent=2, ensure_ascii=False)
-            content = f"שם מענה: {item['שם_מענה']}\nקוד מענה: {item['קוד_מענה']}\nתקציבים: {', '.join(item['תקציבים'])}\nאוכלוסיה: {item['אוכלוסיה']}"
-            print(content)
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200
+            )
+            chunks = text_splitter.split_text(content)
             
-            # Create metadata
-            metadata = {
-                "population": str(item.get("אוכלוסיה", "")),
-                "type": "json",
-                "code_maane": str(item.get("קוד_מענה", "")),
-                "index": i,
-                "source": json_file_path
-            }
-            
-            documents.append({
-                "content": content,
-                "metadata": metadata
-            })
-        
-        logger.info(f"Loaded {len(documents)} documents from JSON file")
+            for i, chunk in enumerate(chunks):
+                if i < 2:
+                    population = "student"
+                elif i < 4:
+                    population = "teacher"
+                else:
+                    population = "principle"  
+                    
+                metadata = {
+                    "type": "txt",
+                    "chunk_index": i,
+                    "source": Path(file_path).name,
+                    "population": population
+                }   
+                documents.append(Document(page_content=chunk, metadata=metadata))
+                
+        logger.info(f"Loaded {len(documents)} documents from file")
         return documents
         
     except Exception as e:
-        logger.error(f"Failed to load JSON file {json_file_path}: {str(e)}")
-        print(f"Error loading JSON file: {str(e)}")
+        logger.error(f"Failed to load file {file_path}: {str(e)}")
+        print(f"Error loading file: {str(e)}")
         raise
+        
 
 def import_json_to_corpus(corpus_name: str, json_file_path: str):
     """Import JSON data to RAG corpus with each item as a separate document."""
     
-    try:
-        print(f"Starting import to corpus: {corpus_name}")
-        
-        # Load JSON as documents
-        documents = load_json_as_documents(json_file_path)
-        total_docs = len(documents)
-        print(f"Loaded {total_docs} documents from JSON file")
-        
-        # Get existing files in corpus to avoid duplicates
+    def get_existing_files(corpus_name: str) -> set:
+        """Get set of existing file names in corpus."""
         try:
             existing_files = rag.list_files(corpus_name=corpus_name)
             existing_names = {file.display_name for file in existing_files}
             print(f"Found {len(existing_names)} existing files in corpus")
+            return existing_names
         except Exception as e:
             print(f"Warning: Could not list existing files: {e}")
-            existing_names = set()
-        
-        # Create a temporary directory to store text files
-        with tempfile.TemporaryDirectory() as temp_dir:
+            return set()
+    
+    def upload_document(temp_dir: str, doc: Document, doc_index: int, display_name: str) -> bool:
+        """Upload a single document to the corpus. Returns True if successful."""
+        try:
+            # Create temporary file (required by RAG API that only accepts file paths)
+            temp_file_path = os.path.join(temp_dir, f"{display_name}.txt")
             
+            with open(temp_file_path, 'w', encoding='utf-8') as f:
+                f.write(doc.page_content)
+            
+            # Upload to RAG corpus
+            rag.upload_file(
+                corpus_name=corpus_name,
+                path=temp_file_path,
+                display_name=display_name
+            )
+            
+            print(f"Uploaded document {doc_index}: {display_name}")
+            print(f"++ content: {doc.page_content}")
+            print(f"++ metadata: {doc.metadata}")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to upload document {doc_index}: {e}")
+            return False
+    
+    try:
+        print(f"Starting import to corpus: {corpus_name}")
+        
+        # Load documents and get existing files
+        documents = load_documents(json_file_path)
+        total_docs = len(documents)
+        existing_names = get_existing_files(corpus_name)
+        
+        print(f"Loaded {total_docs} documents from JSON file")
+        
+        # Process documents
+        with tempfile.TemporaryDirectory() as temp_dir:
             uploaded_count = 0
             skipped_count = 0
             
             for i, doc in enumerate(documents, 1):
                 display_name = f"json_doc_{i}"
                 
-                # Check if document already exists
+                # Skip if document already exists
                 if display_name in existing_names:
                     print(f"Skipping document {i}/{total_docs} - already exists: {display_name}")
                     skipped_count += 1
                     continue
                 
-                try:
-                    # Create a temporary text file for each document
-                    temp_file_path = os.path.join(temp_dir, f"{display_name}.txt")
-                    
-                    # Write content to temporary file with UTF-8 encoding (supports Hebrew)
-                    with open(temp_file_path, 'w', encoding='utf-8') as f:
-                        f.write(doc["content"])
-                    
-                    # Upload the temporary file to RAG corpus with metadata
-                    rag.upload_file(
-                        corpus_name=corpus_name,
-                        path=temp_file_path,
-                        display_name=display_name
-                    )
-                    
+                # Upload document
+                if upload_document(temp_dir, doc, i, display_name):
                     uploaded_count += 1
-                    print(f"Uploaded document {i}/{total_docs}: {display_name}")
-                    print(f"++ content: {doc["content"]}")
-                    print(f"++ metadata: {doc.get('metadata', {})}")
-
-                except Exception as e:
-                    print(f"Failed to upload document {i}: {e}")
-                    continue
         
         print(f"Import completed - Uploaded: {uploaded_count}, Skipped: {skipped_count}, Total: {total_docs}")
         return uploaded_count
@@ -186,117 +214,106 @@ def import_json_to_corpus(corpus_name: str, json_file_path: str):
         print(f"Failed to import JSON to corpus: {e}")
         raise
 
+
 def import_json_to_corpus_jsonl(corpus_name: str, json_file_path: str, gcs_bucket: str):
     """
     Generate a .jsonl ingestion file for Vertex AI RAG corpus.
     Each item in the JSON input becomes a separate document with its own metadata.
     Checks if corpus already has the JSONL file to avoid duplicate work.
     """
+    
+    def get_gcs_paths(corpus_name: str, gcs_bucket: str) -> tuple[str, str]:
+        """Generate GCS blob name and URI for the corpus."""
+        safe_name = os.path.basename(corpus_name)
+        blob_name = f"rag_ingestions/{safe_name}_ingestion.jsonl"
+        gcs_uri = f"gs://{gcs_bucket}/{blob_name}"
+        return blob_name, gcs_uri
+    
+    def check_file_already_imported(corpus_name: str, gcs_uri: str, blob_name: str) -> bool:
+        """Check if file is already imported to the corpus."""
+        try:
+            corpus_files = rag.list_files(corpus_name=corpus_name)
+            return any(
+                gcs_uri in str(file_info) or blob_name in str(file_info)
+                for file_info in corpus_files
+            )
+        except Exception as e:
+            print(f"Could not check corpus files: {e}")
+            return False
+    
+    def import_existing_file(corpus_name: str, gcs_uri: str, documents: List[Document]) -> int:
+        """Import existing GCS file to corpus and return document count."""
+        rag.import_files(corpus_name=corpus_name, paths=[gcs_uri])
+        total_docs = len(documents)
+        print(f"Import completed – Used existing JSONL with {total_docs} documents.")
+        return total_docs
+    
+    def create_and_upload_jsonl(documents: List[Document], blob_name: str, gcs_bucket: str, corpus_name: str) -> str:
+        """Create JSONL file, upload to GCS, and return GCS URI."""
+        gcs_client = storage.Client()
+        bucket = gcs_client.bucket(gcs_bucket)
+        safe_name = os.path.basename(corpus_name)
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            jsonl_path = os.path.join(temp_dir, f"{safe_name}_ingestion.jsonl")
+            
+            with open(jsonl_path, "w", encoding="utf-8") as f:
+                for i, doc in enumerate(documents, 1):
+                    record = {
+                        "id": f"json_doc_{i}",
+                        "content": doc.page_content,
+                        "metadata": doc.metadata
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            
+            print(f"Created local JSONL ingestion file: {jsonl_path}")
+            
+            # Upload to GCS
+            blob = bucket.blob(blob_name)
+            blob.upload_from_filename(jsonl_path)
+            
+            gcs_uri = f"gs://{gcs_bucket}/{blob_name}"
+            print(f"Uploaded JSONL to {gcs_uri}")
+            return gcs_uri
+    
     try:
         print(f"Starting JSONL ingestion preparation for corpus: {corpus_name}")
         
-        # Check if corpus already has this JSONL file
-        safe_name = os.path.basename(corpus_name)
-        expected_blob_name = f"rag_ingestions/{safe_name}_ingestion.jsonl"
-        expected_gcs_uri = f"gs://{gcs_bucket}/{expected_blob_name}"
-        
-        # Check if file already exists in GCS bucket
-        gcs_client = storage.Client()
-        bucket = gcs_client.bucket(gcs_bucket)
-        blob = bucket.blob(expected_blob_name)
-        
-        if blob.exists():
-            print(f"JSONL file already exists at {expected_gcs_uri}")
-            
-            # Check if corpus already has this file imported
-            try:
-                # Get corpus files (this method depends on your RAG library implementation)
-                # You may need to adjust this based on your specific RAG library
-                corpus_files = rag.list_files(corpus_name=corpus_name)
-                
-                # Check if the expected file is already in the corpus
-                file_already_imported = any(
-                    expected_gcs_uri in str(file_info) or expected_blob_name in str(file_info)
-                    for file_info in corpus_files
-                )
-                
-                if file_already_imported:
-                    print(f"File {expected_gcs_uri} is already imported to corpus {corpus_name}")
-                    print("Skipping import - no action needed")
-                    
-                    # Return estimated document count from JSON file
-                    documents = load_json_as_documents(json_file_path)
-                    return len(documents)
-                else:
-                    print(f"File exists in GCS but not imported to corpus. Importing {expected_gcs_uri}")
-                    # Import existing file into Vertex AI RAG
-                    rag.import_files(
-                        corpus_name=corpus_name,
-                        paths=[expected_gcs_uri]
-                    )
-                    
-                    documents = load_json_as_documents(json_file_path)
-                    total_docs = len(documents)
-                    print(f"Import completed – Used existing JSONL with {total_docs} documents.")
-                    return total_docs
-                    
-            except Exception as e:
-                print(f"Could not check corpus files, proceeding with import: {e}")
-                # If we can't check corpus files, just import the existing GCS file
-                rag.import_files(
-                    corpus_name=corpus_name,
-                    paths=[expected_gcs_uri]
-                )
-                
-                documents = load_json_as_documents(json_file_path)
-                total_docs = len(documents)
-                print(f"Import completed – Used existing JSONL with {total_docs} documents.")
-                return total_docs
-
-        # If file doesn't exist, proceed with original logic
-        print(f"JSONL file not found in GCS. Creating new ingestion file.")
-
-        # Load JSON as documents
-        documents = load_json_as_documents(json_file_path)
+        # Load documents first (needed in all code paths)
+        documents = load_documents(json_file_path)
         total_docs = len(documents)
         print(f"Loaded {total_docs} documents from JSON file")
-
-        # Create .jsonl file in a temporary directory
-        with tempfile.TemporaryDirectory() as temp_dir:
-            jsonl_path = os.path.join(temp_dir, f"{safe_name}_ingestion.jsonl")
-
-            with open(jsonl_path, "w", encoding="utf-8") as f:
-                for i, doc in enumerate(documents, 1):
-                    # Ensure safe defaults
-                    content = doc.get("content", "")
-                    metadata = doc.get("metadata", {})
-                    
-                    # Each line = one document
-                    record = {
-                        "id": f"json_doc_{i}",
-                        "content": content,
-                        "metadata": metadata
-                    }
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-            print(f"Created local JSONL ingestion file: {jsonl_path}")
-            print(f"Contains {total_docs} documents.")
-
-            # Upload to GCS
-            blob = bucket.blob(expected_blob_name)
-            blob.upload_from_filename(jsonl_path)
-
-            print(f"Uploaded JSONL to {expected_gcs_uri}")
-
-            # Import into Vertex AI RAG
-            rag.import_files(
-                corpus_name=corpus_name,
-                paths=[expected_gcs_uri]
-            )
-
-            print(f"Import completed – Prepared {total_docs} documents in JSONL format.")
-            return total_docs
-
+        
+        # Get GCS paths
+        blob_name, gcs_uri = get_gcs_paths(corpus_name, gcs_bucket)
+        
+        # Check if file exists in GCS
+        gcs_client = storage.Client()
+        bucket = gcs_client.bucket(gcs_bucket)
+        blob = bucket.blob(blob_name)
+        
+        if blob.exists():
+            print(f"JSONL file already exists at {gcs_uri}")
+            
+            # Check if already imported to corpus
+            if check_file_already_imported(corpus_name, gcs_uri, blob_name):
+                print(f"File {gcs_uri} is already imported to corpus {corpus_name}")
+                print("Skipping import - no action needed")
+                return total_docs
+            else:
+                print(f"File exists in GCS but not imported to corpus. Importing {gcs_uri}")
+                return import_existing_file(corpus_name, gcs_uri, documents)
+        
+        # File doesn't exist - create new one
+        print(f"JSONL file not found in GCS. Creating new ingestion file.")
+        gcs_uri = create_and_upload_jsonl(documents, blob_name, gcs_bucket, corpus_name)
+        
+        # Import into Vertex AI RAG
+        rag.import_files(corpus_name=corpus_name, paths=[gcs_uri])
+        
+        print(f"Import completed – Prepared {total_docs} documents in JSONL format.")
+        return total_docs
+        
     except Exception as e:
         print(f"Failed to import JSON to corpus: {e}")
         raise
@@ -506,7 +523,7 @@ def create_rag_retrieval_config(top_k: int = 3, similarity_threshold: float = 0.
                 # Vector similarity threshold
                 vector_similarity_threshold = similarity_threshold,  # Optional
                 # Metadata filtering (limited options)
-                metadata_filter = f'metadata."{metadataFilterField}" = "{metadataFilterValue}"'
+                metadata_filter = f'metadata.{metadataFilterField} == {metadataFilterValue}'
             )
         )
 
@@ -527,7 +544,7 @@ def perform_direct_retrieval(rag_corpus, query_text: str, rag_retrieval_config):
                 rag.RagResource(
                     rag_corpus=rag_corpus.name,
                     # Optional: supply IDs from `rag.list_files()`.
-                    # rag_file_ids=["rag-file-1", "rag-file-2", ...],
+                     rag_file_ids=["json_doc_1", "json_doc_5"],
                 )
             ],
             text=query_text,
@@ -540,6 +557,44 @@ def perform_direct_retrieval(rag_corpus, query_text: str, rag_retrieval_config):
         print(f"Error in direct context retrieval: {str(e)}")
         raise
 
+def get_actual_rag_file_ids(corpus_name: str):
+    """Get the real file IDs that Vertex AI RAG Engine created"""
+    try:
+        # List all files in the corpus to see their actual IDs
+        files_pager = rag.list_files(corpus_name=corpus_name)
+        
+        # Convert pager to list
+        files_list = list(files_pager)
+        
+        print(f"Found {len(files_list)} files in corpus:")
+        actual_file_ids = []
+        
+        for i, file_info in enumerate(files_list):
+            print(f"\n--- File {i+1} ---")
+            print(f"Full Resource Name: {file_info.name}")
+            print(f"Display Name: {file_info.display_name}")
+            
+            # Check if these attributes exist
+            if hasattr(file_info, 'size_bytes'):
+                print(f"Size: {file_info.size_bytes} bytes")
+            if hasattr(file_info, 'create_time'):
+                print(f"Create Time: {file_info.create_time}")
+            
+            # Extract just the file ID part (last component of the name)
+            file_id = file_info.name.split('/')[-1]
+            actual_file_ids.append(file_id)
+            print(f"Usable File ID: {file_id}")
+            
+            # Print all available attributes for debugging
+            print(f"Available attributes: {dir(file_info)}")
+        
+        print(f"\nAll usable file IDs: {actual_file_ids}")
+        return actual_file_ids
+        
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        return []
+    
 def create_rag_retrieval_tool(rag_corpus, rag_retrieval_config):
     """Create a RAG retrieval tool."""
     try:
@@ -597,7 +652,8 @@ def main():
     REGION = "europe-west4"
     PROJECT_ID = "gapmaanim"
     display_name = "json_corpus"    
-    data_file = "files/data.json"
+    # data_file = "files/data.json"
+    data_file = "files/data.txt"
     # json_file_path = "https://drive.google.com/file/d/1zQJ6Kx1XmnD9tBQJT9KKsqQ5kymR0aqD/view?usp=drive_link"
     # paths = ["https://drive.google.com/file/d/1lIU-DKYKOAbd6vslKP6xFVZiyPGIHQgX/view?usp=sharing"] 
     model_name = "gemini-2.0-flash-lite"
@@ -605,7 +661,8 @@ def main():
     #query_text = "מחפשת מענה בשם: ימי שיא, שנמצא תחת אוכלוסיה: מוסד, population: מוסד" # ענה תקין שלא נמצאו תוצאות עבור חיפוש של מוסד 
     #query_text = "מחפשת מענה בשם: ימי שיא, אוכלוסיה: מוסד, population: מוסד" #לא ענה תקין, הביא תוצאה של מחוז
     #query_text = "מחפשת מענה בשם: ימי שיא"
-    query_text = "מחפשת מענה שנמצא תחת אוכלוסיה: מוסד"
+    #query_text = "מחפשת מענה שנמצא תחת אוכלוסיה: מוסד"
+    query_text = "מה זה אפקט הול"
     gcs_bucket = "gap-jsonl-rag-bucket"
 
     # query_text = "מה זה PVD?"
@@ -628,11 +685,13 @@ def main():
     print("\n" + "="*60)
     print("🔍 CHECKING CORPUS INDEXING STATUS")
     print("="*60)
-    check_corpus_status(rag_corpus.name, max_wait_time=600, check_interval=30)
+    check_corpus_status(rag_corpus.name, max_wait_time=600, check_interval=3)
     print("="*60 + "\n")
 
+    get_actual_rag_file_ids(rag_corpus.name)
+
     # Create RAG retrieval configuration
-    rag_retrieval_config = create_rag_retrieval_config(30,0.4,"population","מוסד")
+    rag_retrieval_config = create_rag_retrieval_config(3,0.4,"population","principle")
     
     # Perform direct context retrieval
     direct_response = perform_direct_retrieval(rag_corpus, query_text, rag_retrieval_config)

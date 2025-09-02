@@ -1,6 +1,37 @@
+# Vertex AI RAG Engine
 google-cloud-aiplatform>=1.38.0
+
+
 
 # vertex ai vector search (customized)
 langchain-core==0.3.65
 langchain==0.3.25
 python-dotenv==1.1.1
+
+
+
+# vertex ai search
+# Core Google Cloud packages
+google-cloud-discoveryengine>=0.11.0
+google-cloud-storage>=2.10.0
+
+# Document processing (if you're still using your existing load_documents function)
+langchain>=0.1.0
+langchain-text-splitters>=0.0.1
+
+# Authentication and core Google Cloud
+google-auth>=2.17.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+
+# Protocol Buffers (required for Google Cloud APIs)
+protobuf>=4.21.0
+
+# HTTP requests and JSON handling
+requests>=2.28.0
+
+# Logging and utilities
+python-dotenv>=1.0.0
+
+# Optional: If you want to continue using some RAG Engine functionality alongside Search
+vertexai>=1.30.0
