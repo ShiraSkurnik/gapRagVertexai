@@ -43,6 +43,7 @@ def ask_question():
         maanimWithKriteryonim = data_req.get('maanimWithKriteryonim', [])
         question = data_req.get('question', '').strip()
         chat_history = data_req.get('chat_history', [])
+        shown_maanim_ids = data_req.get('shown_maanim_ids',"")
         # print("================finish get data========================")
         # תוכל לשמור את זה, לעבד או לאתחל את המערכת איתם
         # לדוגמה:
@@ -67,21 +68,13 @@ def ask_question():
             "sources": [],
             "user_info": user_info,
             "chat_history": chat_history,
-            "summary": ""
+            "summary": "",
+            "shown_maanim_ids":shown_maanim_ids
         }
         print(f"----------Processing question: {question}-----------")
-        # Run the workflow
         result = app_graph.invoke(initial_state)
-        
-        return jsonify({
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "question": question,
-            "search_query": result["search_query"],
-            "summary": result["summary"],
-            "chat_history": result["chat_history"],
-        })
-        
+        return result
+      
     except Exception as e:
         print(f"Error processing question: {e}")
         return jsonify({

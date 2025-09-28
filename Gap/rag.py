@@ -9,14 +9,14 @@ from graph_state import GraphState
 # הגדרות קבועות
 os.environ["http_proxy"] = "http://10.20.14.35:8080"
 os.environ["https_proxy"] = "http://10.20.14.35:8080"
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "Gap/rag-service-account-key.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "rag-service-account-key.json"
 
 PROJECT_ID = "ai-gap-470906"
 REGION = "europe-west4"
 DISPLAY_NAME = "maanim_gap_corpus"
-SERVICE_ACCOUNT_JSON = "Gap/rag-service-account-key.json"
-FILES_PATH = "Gap/files/"
-FILE_NAME = "maanim"
+SERVICE_ACCOUNT_JSON = "rag-service-account-key.json"
+FILES_PATH = "files/"
+FILE_NAME = "maanim_desc"# "maanim"
 BUCKET_NAME = "gap-maanim-bucket"
 credentials = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_JSON
@@ -24,27 +24,6 @@ credentials = service_account.Credentials.from_service_account_file(
 
 vertexai.init(project=PROJECT_ID, location=REGION, credentials=credentials)
 storage_client = storage.Client(project=PROJECT_ID, credentials=credentials)
-
-
-
-def create_jsonl_file():
-    # נתיב קובץ המקור JSON
-    input_file = f"{FILES_PATH}{FILE_NAME}.json" 
-    # נתיב קובץ היעד JSONL
-    output_file = f"{FILES_PATH}{FILE_NAME}.jsonl"
-
-    # קורא את הקובץ JSON
-    with open(input_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    # יוצר את קובץ JSONL
-    with open(output_file, "w", encoding="utf-8") as f:
-        for item in data:
-            json_line = json.dumps(item, ensure_ascii=False)
-            f.write(json_line + "\n")
-
-    print(f"נוצר בהצלחה: {output_file}")
-    return output_file
 
 def upload_file_to_gcs(file_path: str) -> str:
     try:        
@@ -108,12 +87,12 @@ def query_rag(state: GraphState) -> GraphState:
     
     search_query = state["search_query"]
     print(f"start query_rag for {search_query}")
-    corpus_name="projects/220128409398/locations/europe-west4/ragCorpora/4899916394579099648"
+    corpus_name="projects/220128409398/locations/europe-west4/ragCorpora/5685794529555251200"
     rag_retrieval_config = rag.RagRetrievalConfig(
-        top_k=4,
+        top_k=25,
         filter=rag.Filter(vector_distance_threshold=0.9),
     )
-
+    print("after config")
     response = rag.retrieval_query(
         rag_resources=[rag.RagResource(rag_corpus=corpus_name)],
         text=search_query,
@@ -122,16 +101,18 @@ def query_rag(state: GraphState) -> GraphState:
 
     print("תוצאות השאילתה:")
     print(response)
-    state["retrieved_docs"]=response
+    texts = [ctx.text for ctx in response.contexts.contexts]
+    print(texts)
+    state["retrieved_docs"]=texts
     return state
 
 def create_rag() -> str:
-    jsonl_file = create_jsonl_file()
+    jsonl_file = f"{FILES_PATH}{FILE_NAME}.jsonl" #create_jsonl_file()
     gcs_path = upload_file_to_gcs(jsonl_file)
     corpus_name = create_rag_corpus(gcs_path)
  
 if __name__ == "__main__":
     # create_rag()
-    state = {"search_query":" יש קריטריון סל מנהיגות חינוכית "}
+    state = {"search_query":"תרבות יהודית"}
     res = query_rag(state)
 

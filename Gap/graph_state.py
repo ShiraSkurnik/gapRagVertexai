@@ -9,7 +9,8 @@ class GraphState(TypedDict):
     # vectorstore: object
     retrieved_docs: object
     answer: str
-    sources: List[str]
     user_info: str
     chat_history: List[Dict[str, str]]  # רשימה של תמצות שאלות ותשובות
     summary: str  # תמצית של השאלה והתשובה הנוכחית
+    selected_maanim: object
+    shown_maanim_ids: str # מענים שחזרו בתשובות קודמות 

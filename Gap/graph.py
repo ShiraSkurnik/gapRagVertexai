@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
 from graph_state import GraphState
-from llm import generate_answer,process_user_query,classify_message,create_summary
+from llm import generate_answer,process_user_query,classify_message,create_summary,generate_answer_improved
 from rag import query_rag
 
 def create_workflow():
@@ -9,7 +9,7 @@ def create_workflow():
     workflow.add_node("classify", classify_message)
     workflow.add_node("process_query", process_user_query)
     workflow.add_node("retrieve", query_rag)
-    workflow.add_node("generate", generate_answer)
+    workflow.add_node("generate", generate_answer_improved)
     workflow.add_node("create_summary", create_summary)  # שלב חדש ליצירת תמצית
 
     # נקודת כניסה
@@ -33,6 +33,7 @@ def create_workflow():
     # הסתעפות לאחר הסיווג
     workflow.add_edge("process_query", "retrieve")
     workflow.add_edge("retrieve", "generate")
+    # workflow.add_edge("process_query", "generate")
     workflow.add_edge("generate", "create_summary") 
     workflow.add_edge("create_summary", END)
 
